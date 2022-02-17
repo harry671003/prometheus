@@ -122,6 +122,7 @@ func (e ErrStorage) Error() string {
 type QueryEngine interface {
 	NewInstantQuery(ctx context.Context, q storage.Queryable, opts QueryOpts, qs string, ts time.Time) (Query, error)
 	NewRangeQuery(ctx context.Context, q storage.Queryable, opts QueryOpts, qs string, start, end time.Time, interval time.Duration) (Query, error)
+	SetReportStats(func(ctx context.Context, qs stats.QueryStats, err error))
 }
 
 var _ QueryLogger = (*logging.JSONFileLogger)(nil)
@@ -247,6 +248,11 @@ func (q *query) Exec(ctx context.Context) *Result {
 
 	// Exec query.
 	res, warnings, err := q.ng.exec(ctx, q)
+
+	if q.ng.ReportStats != nil {
+		q.ng.ReportStats(ctx, stats.NewQueryStats(q.Stats()), err)
+	}
+
 	return &Result{Err: err, Value: res, Warnings: warnings}
 }
 
@@ -325,6 +331,9 @@ type EngineOpts struct {
 	// This is useful in certain scenarios where the __name__ label must be preserved or where applying a
 	// regex-matcher to the __name__ label may otherwise lead to duplicate labelset errors.
 	EnableDelayedNameRemoval bool
+
+	// ReportStats if set, called after every query runs
+	ReportStats func(ctx context.Context, qs stats.QueryStats, err error)
 }
 
 // Engine handles the lifetime of queries from beginning to end.
@@ -343,6 +352,7 @@ type Engine struct {
 	enableNegativeOffset     bool
 	enablePerStepStats       bool
 	enableDelayedNameRemoval bool
+	ReportStats              func(ctx context.Context, qs stats.QueryStats, err error)
 }
 
 // NewEngine returns a new engine.
@@ -434,6 +444,7 @@ func NewEngine(opts EngineOpts) *Engine {
 		enableNegativeOffset:     opts.EnableNegativeOffset,
 		enablePerStepStats:       opts.EnablePerStepStats,
 		enableDelayedNameRemoval: opts.EnableDelayedNameRemoval,
+		ReportStats:              opts.ReportStats,
 	}
 }
 
@@ -983,6 +994,10 @@ func (ng *Engine) populateSeries(ctx context.Context, querier storage.Querier, s
 		}
 		return nil
 	})
+}
+
+func (ng *Engine) SetReportStats(rs func(ctx context.Context, qs stats.QueryStats, err error)) {
+	ng.ReportStats = rs
 }
 
 // extractFuncFromPath walks up the path and searches for the first instance of
