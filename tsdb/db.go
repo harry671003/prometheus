@@ -224,6 +224,8 @@ type Options struct {
 	// PostingsDecoderFactory allows users to customize postings decoders based on BlockMeta.
 	// By default, DefaultPostingsDecoderFactory will be used to create raw posting decoder.
 	PostingsDecoderFactory PostingsDecoderFactory
+
+	OpenBlockOptions OpenBlockOptions
 }
 
 type NewCompactorFunc func(ctx context.Context, r prometheus.Registerer, l *slog.Logger, ranges []int64, pool chunkenc.Pool, opts *Options) (Compactor, error)
@@ -287,6 +289,8 @@ type DB struct {
 	blockQuerierFunc BlockQuerierFunc
 
 	blockChunkQuerierFunc BlockChunkQuerierFunc
+
+	openBlockOptions OpenBlockOptions
 }
 
 type dbMetrics struct {
@@ -638,7 +642,7 @@ func (db *DBReadOnly) Blocks() ([]BlockReader, error) {
 		return nil, ErrClosed
 	default:
 	}
-	loadable, corrupted, err := openBlocks(db.logger, db.dir, nil, nil, DefaultPostingsDecoderFactory)
+	loadable, corrupted, err := openBlocks(db.logger, OpenBlockOptions{}, db.dir, nil, nil, DefaultPostingsDecoderFactory)
 	if err != nil {
 		return nil, err
 	}
@@ -860,16 +864,17 @@ func open(dir string, l *slog.Logger, r prometheus.Registerer, opts *Options, rn
 	}
 
 	db := &DB{
-		dir:            dir,
-		logger:         l,
-		opts:           opts,
-		compactc:       make(chan struct{}, 1),
-		donec:          make(chan struct{}),
-		stopc:          make(chan struct{}),
-		autoCompact:    true,
-		chunkPool:      chunkenc.NewPool(),
-		blocksToDelete: opts.BlocksToDelete,
-		registerer:     r,
+		dir:              dir,
+		logger:           l,
+		opts:             opts,
+		compactc:         make(chan struct{}, 1),
+		donec:            make(chan struct{}),
+		stopc:            make(chan struct{}),
+		autoCompact:      true,
+		chunkPool:        chunkenc.NewPool(),
+		blocksToDelete:   opts.BlocksToDelete,
+		openBlockOptions: opts.OpenBlockOptions,
+		registerer:       r,
 	}
 	defer func() {
 		// Close files if startup fails somewhere.
@@ -1574,7 +1579,7 @@ func (db *DB) reloadBlocks() (err error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	loadable, corrupted, err := openBlocks(db.logger, db.dir, db.blocks, db.chunkPool, db.opts.PostingsDecoderFactory)
+	loadable, corrupted, err := openBlocks(db.logger, db.openBlockOptions, db.dir, db.blocks, db.chunkPool, db.opts.PostingsDecoderFactory)
 	if err != nil {
 		return err
 	}
@@ -1669,7 +1674,7 @@ func (db *DB) reloadBlocks() (err error) {
 	return nil
 }
 
-func openBlocks(l *slog.Logger, dir string, loaded []*Block, chunkPool chunkenc.Pool, postingsDecoderFactory PostingsDecoderFactory) (blocks []*Block, corrupted map[ulid.ULID]error, err error) {
+func openBlocks(l *slog.Logger, openBlockOptions OpenBlockOptions, dir string, loaded []*Block, chunkPool chunkenc.Pool, postingsDecoderFactory PostingsDecoderFactory) (blocks []*Block, corrupted map[ulid.ULID]error, err error) {
 	bDirs, err := blockDirs(dir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("find blocks: %w", err)
@@ -1686,7 +1691,7 @@ func openBlocks(l *slog.Logger, dir string, loaded []*Block, chunkPool chunkenc.
 		// See if we already have the block in memory or open it otherwise.
 		block, open := getBlock(loaded, meta.ULID)
 		if !open {
-			block, err = OpenBlock(l, bDir, chunkPool, postingsDecoderFactory)
+			block, err = OpenBlockWithOptions(l, bDir, chunkPool, postingsDecoderFactory, openBlockOptions)
 			if err != nil {
 				corrupted[meta.ULID] = err
 				continue

@@ -119,20 +119,28 @@ func (q *blockQuerier) Select(ctx context.Context, sortSeries bool, hints *stora
 }
 
 func selectSeriesSet(ctx context.Context, sortSeries bool, hints *storage.SelectHints, ms []*labels.Matcher,
-	index IndexReader, chunks ChunkReader, tombstones tombstones.Reader, mint, maxt int64,
+	ir IndexReader, chunks ChunkReader, tombstones tombstones.Reader, mint, maxt int64,
 ) storage.SeriesSet {
 	disableTrimming := false
 	sharded := hints != nil && hints.ShardCount > 0
 
-	p, err := PostingsForMatchers(ctx, index, ms...)
+	var p index.Postings
+	var err error
+
+	if i, ok := ir.(ExtendedIndexReader); ok {
+		p, err = i.PostingsForMatchers(ctx, ms...)
+	} else {
+		p, err = PostingsForMatchers(ctx, ir, ms...)
+	}
+
 	if err != nil {
 		return storage.ErrSeriesSet(err)
 	}
 	if sharded {
-		p = index.ShardedPostings(p, hints.ShardIndex, hints.ShardCount)
+		p = ir.ShardedPostings(p, hints.ShardIndex, hints.ShardCount)
 	}
 	if sortSeries {
-		p = index.SortedPostings(p)
+		p = ir.SortedPostings(p)
 	}
 
 	if hints != nil {
@@ -141,11 +149,11 @@ func selectSeriesSet(ctx context.Context, sortSeries bool, hints *storage.Select
 		disableTrimming = hints.DisableTrimming
 		if hints.Func == "series" {
 			// When you're only looking up metadata (for example series API), you don't need to load any chunks.
-			return newBlockSeriesSet(index, newNopChunkReader(), tombstones, p, mint, maxt, disableTrimming)
+			return newBlockSeriesSet(ir, newNopChunkReader(), tombstones, p, mint, maxt, disableTrimming)
 		}
 	}
 
-	return newBlockSeriesSet(index, chunks, tombstones, p, mint, maxt, disableTrimming)
+	return newBlockSeriesSet(ir, chunks, tombstones, p, mint, maxt, disableTrimming)
 }
 
 // blockChunkQuerier provides chunk querying access to a single block database.
@@ -167,7 +175,7 @@ func (q *blockChunkQuerier) Select(ctx context.Context, sortSeries bool, hints *
 }
 
 func selectChunkSeriesSet(ctx context.Context, sortSeries bool, hints *storage.SelectHints, ms []*labels.Matcher,
-	blockID ulid.ULID, index IndexReader, chunks ChunkReader, tombstones tombstones.Reader, mint, maxt int64,
+	blockID ulid.ULID, ir IndexReader, chunks ChunkReader, tombstones tombstones.Reader, mint, maxt int64,
 ) storage.ChunkSeriesSet {
 	disableTrimming := false
 	sharded := hints != nil && hints.ShardCount > 0
@@ -177,17 +185,26 @@ func selectChunkSeriesSet(ctx context.Context, sortSeries bool, hints *storage.S
 		maxt = hints.End
 		disableTrimming = hints.DisableTrimming
 	}
-	p, err := PostingsForMatchers(ctx, index, ms...)
+
+	var p index.Postings
+	var err error
+
+	if i, ok := ir.(ExtendedIndexReader); ok {
+		p, err = i.PostingsForMatchers(ctx, ms...)
+	} else {
+		p, err = PostingsForMatchers(ctx, ir, ms...)
+	}
+
 	if err != nil {
 		return storage.ErrChunkSeriesSet(err)
 	}
 	if sharded {
-		p = index.ShardedPostings(p, hints.ShardIndex, hints.ShardCount)
+		p = ir.ShardedPostings(p, hints.ShardIndex, hints.ShardCount)
 	}
 	if sortSeries {
-		p = index.SortedPostings(p)
+		p = ir.SortedPostings(p)
 	}
-	return NewBlockChunkSeriesSet(blockID, index, chunks, tombstones, p, mint, maxt, disableTrimming)
+	return NewBlockChunkSeriesSet(blockID, ir, chunks, tombstones, p, mint, maxt, disableTrimming)
 }
 
 // PostingsForMatchers assembles a single postings iterator against the index reader

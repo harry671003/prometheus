@@ -116,6 +116,11 @@ type IndexReader interface {
 	Close() error
 }
 
+type ExtendedIndexReader interface {
+	IndexReader
+	PostingsForMatchers(ctx context.Context, ms ...*labels.Matcher) (index.Postings, error)
+}
+
 // ChunkWriter serializes a time block of chunked series data.
 type ChunkWriter interface {
 	// WriteChunks writes several chunks. The Chunk field of the ChunkMetas
@@ -323,12 +328,28 @@ type Block struct {
 	numBytesMeta      int64
 }
 
+type IndexReaderWrapFunc func(reader *index.Reader) IndexReader
+
+type OpenBlockOptions struct {
+	IndexReaderWrapFunc IndexReaderWrapFunc
+}
+
 // OpenBlock opens the block in the directory. It can be passed a chunk pool, which is used
 // to instantiate chunk structs.
 func OpenBlock(logger *slog.Logger, dir string, pool chunkenc.Pool, postingsDecoderFactory PostingsDecoderFactory) (pb *Block, err error) {
+	return OpenBlockWithOptions(logger, dir, pool, postingsDecoderFactory, OpenBlockOptions{})
+}
+
+func OpenBlockWithOptions(logger *slog.Logger, dir string, pool chunkenc.Pool, postingsDecoderFactory PostingsDecoderFactory, ops OpenBlockOptions) (pb *Block, err error) {
 	if logger == nil {
 		logger = promslog.NewNopLogger()
 	}
+	if ops.IndexReaderWrapFunc == nil {
+		ops.IndexReaderWrapFunc = func(reader *index.Reader) IndexReader {
+			return reader
+		}
+	}
+
 	var closers []io.Closer
 	defer func() {
 		if err != nil {
@@ -366,7 +387,7 @@ func OpenBlock(logger *slog.Logger, dir string, pool chunkenc.Pool, postingsDeco
 		dir:               dir,
 		meta:              *meta,
 		chunkr:            cr,
-		indexr:            ir,
+		indexr:            ops.IndexReaderWrapFunc(ir),
 		tombstones:        tr,
 		symbolTableSize:   ir.SymbolTableSize(),
 		logger:            logger,
@@ -433,7 +454,13 @@ func (pb *Block) Index() (IndexReader, error) {
 	if err := pb.startRead(); err != nil {
 		return nil, err
 	}
-	return blockIndexReader{ir: pb.indexr, b: pb}, nil
+
+	indexReader := blockIndexReader{ir: pb.indexr, b: pb}
+
+	if _, ok := pb.indexr.(ExtendedIndexReader); ok {
+		return extendedBlockIndexReader{blockIndexReader: indexReader}, nil
+	}
+	return indexReader, nil
 }
 
 // Chunks returns a new ChunkReader against the block data.
@@ -559,6 +586,19 @@ func (r blockIndexReader) LabelValueFor(ctx context.Context, id storage.SeriesRe
 // The names returned are sorted.
 func (r blockIndexReader) LabelNamesFor(ctx context.Context, postings index.Postings) ([]string, error) {
 	return r.ir.LabelNamesFor(ctx, postings)
+}
+
+type extendedBlockIndexReader struct {
+	blockIndexReader
+}
+
+func (r extendedBlockIndexReader) PostingsForMatchers(ctx context.Context, ms ...*labels.Matcher) (index.Postings, error) {
+	extendedReader, ok := r.ir.(ExtendedIndexReader)
+	if !ok {
+		return nil, fmt.Errorf("missing methods for ExtendedIndexReader")
+	}
+
+	return extendedReader.PostingsForMatchers(ctx, ms...)
 }
 
 type blockTombstoneReader struct {
