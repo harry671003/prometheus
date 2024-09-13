@@ -79,11 +79,13 @@ func newBlockBaseQuerier(b BlockReader, mint, maxt int64) (*blockBaseQuerier, er
 
 func (q *blockBaseQuerier) LabelValues(ctx context.Context, name string, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	res, err := q.index.SortedLabelValues(ctx, name, matchers...)
+	res = truncateToLimit(res, hints)
 	return res, nil, err
 }
 
 func (q *blockBaseQuerier) LabelNames(ctx context.Context, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	res, err := q.index.LabelNames(ctx, matchers...)
+	res = truncateToLimit(res, hints)
 	return res, nil, err
 }
 
@@ -99,6 +101,13 @@ func (q *blockBaseQuerier) Close() error {
 	)
 	q.closed = true
 	return errs.Err()
+}
+
+func truncateToLimit(s []string, hints *storage.LabelHints) []string {
+	if hints != nil && hints.Limit > 0 && len(s) > hints.Limit {
+		s = s[:hints.Limit]
+	}
+	return s
 }
 
 type blockQuerier struct {
@@ -147,6 +156,7 @@ func selectSeriesSet(ctx context.Context, sortSeries bool, hints *storage.Select
 		mint = hints.Start
 		maxt = hints.End
 		disableTrimming = hints.DisableTrimming
+		p = index.NewLimitedPostings(p, hints.Limit)
 		if hints.Func == "series" {
 			// When you're only looking up metadata (for example series API), you don't need to load any chunks.
 			return newBlockSeriesSet(ir, newNopChunkReader(), tombstones, p, mint, maxt, disableTrimming)
