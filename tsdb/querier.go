@@ -518,11 +518,15 @@ type blockBaseSeriesSet struct {
 	bufChks []chunks.Meta
 	builder labels.ScratchBuilder
 	err     error
+
+	checkOrder    bool
+	lastSeriesRef storage.SeriesRef
 }
 
 func (b *blockBaseSeriesSet) Next() bool {
 	for b.p.Next() {
-		if err := b.index.Series(b.p.At(), &b.builder, &b.bufChks); err != nil {
+		ref := b.p.At()
+		if err := b.index.Series(ref, &b.builder, &b.bufChks); err != nil {
 			// Postings may be stale. Skip if no underlying series exists.
 			if errors.Is(err, storage.ErrNotFound) {
 				continue
@@ -593,7 +597,12 @@ func (b *blockBaseSeriesSet) Next() bool {
 			intervals = intervals.Add(tombstones.Interval{Mint: b.maxt + 1, Maxt: math.MaxInt64})
 		}
 
-		b.curr.labels = b.builder.Labels()
+		lbls := b.builder.Labels()
+		if b.checkOrder && labels.Compare(lbls, b.curr.labels) <= 0 {
+			fmt.Printf("out-of-order series found with label set %q ref %d, last label set %q ref %d\n", lbls, ref, b.curr.labels, b.lastSeriesRef)
+		}
+		b.lastSeriesRef = ref
+		b.curr.labels = lbls
 		b.curr.chks = chks
 		b.curr.intervals = intervals
 		return true
@@ -1132,6 +1141,22 @@ func NewBlockChunkSeriesSet(id ulid.ULID, i IndexReader, c ChunkReader, t tombst
 			mint:            mint,
 			maxt:            maxt,
 			disableTrimming: disableTrimming,
+		},
+	}
+}
+
+func NewBlockChunkSeriesSetWithCheckOrder(id ulid.ULID, i IndexReader, c ChunkReader, t tombstones.Reader, p index.Postings, mint, maxt int64, disableTrimming bool) storage.ChunkSeriesSet {
+	return &blockChunkSeriesSet{
+		blockBaseSeriesSet{
+			blockID:         id,
+			index:           i,
+			chunks:          c,
+			tombstones:      t,
+			p:               p,
+			mint:            mint,
+			maxt:            maxt,
+			disableTrimming: disableTrimming,
+			checkOrder:      true,
 		},
 	}
 }
