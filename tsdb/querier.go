@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
+	"strings"
 
 	"github.com/oklog/ulid"
 
@@ -601,6 +603,9 @@ func (b *blockBaseSeriesSet) Next() bool {
 		if b.checkOrder && labels.Compare(lbls, b.curr.labels) <= 0 {
 			fmt.Printf("out-of-order series found with label set %q ref %d, last label set %q ref %d\n", lbls, ref, b.curr.labels, b.lastSeriesRef)
 		}
+
+		sortLabelsIfNeeded(lbls)
+
 		b.lastSeriesRef = ref
 		b.curr.labels = lbls
 		b.curr.chks = chks
@@ -608,6 +613,30 @@ func (b *blockBaseSeriesSet) Next() bool {
 		return true
 	}
 	return false
+}
+
+func sortLabelsIfNeeded(labels labels.Labels) {
+	// no need to run sort.Slice, if labels are already sorted, which is most of the time.
+	// we can avoid extra memory allocations (mostly interface-related) this way.
+	sorted := true
+	last := ""
+	for _, l := range labels {
+		if strings.Compare(last, l.Name) > 0 {
+			sorted = false
+			break
+		}
+		last = l.Name
+	}
+
+	if sorted {
+		return
+	}
+
+	fmt.Printf("out-of-order label set found: %s\n", labels)
+
+	sort.Slice(labels, func(i, j int) bool {
+		return strings.Compare(labels[i].Name, labels[j].Name) < 0
+	})
 }
 
 func (b *blockBaseSeriesSet) Err() error {
